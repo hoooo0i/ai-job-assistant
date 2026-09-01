@@ -3,7 +3,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.streamlit/
+.streamlit/secrets.toml
 .DS_Store
 coverage.xml
 .coverage

@@ -4,8 +4,11 @@ import re
 
 from src.privacy import redact_sensitive_info
 from src.schemas import (
+    CandidateFact,
+    EvidenceSource,
     JobProfile,
     MatchAnalysis,
+    MatchEvidence,
     MatchStatus,
     RequirementImportance,
     RequirementMatch,
@@ -44,6 +47,7 @@ def validate_and_sanitise_matches(
     analysis: MatchAnalysis,
     job_profile: JobProfile,
     resume_text: str,
+    candidate_facts: list[CandidateFact] | None = None,
 ) -> MatchAnalysis:
     """Require one result per JD requirement and remove unsupported evidence."""
     expected_ids = [requirement.id for requirement in job_profile.requirements]
@@ -55,6 +59,14 @@ def validate_and_sanitise_matches(
         raise MatchValidationError("模型返回的匹配结果未完整覆盖岗位要求，请重试。")
 
     safe_resume = _normalise_for_evidence_check(redact_sensitive_info(resume_text))
+    facts = candidate_facts or []
+    fact_text_by_id = {
+        item.id: _normalise_for_evidence_check(
+            " ".join(filter(None, [item.statement, item.metrics]))
+        )
+        for item in facts
+    }
+    combined_source = " ".join([safe_resume, *fact_text_by_id.values()])
     matches_by_id = {match.requirement_id: match for match in analysis.matches}
     sanitised_matches: list[RequirementMatch] = []
 
@@ -66,10 +78,34 @@ def validate_and_sanitise_matches(
             if evidence.strip()
             and _normalise_for_evidence_check(evidence) in safe_resume
         ]
+        structured_evidence: list[MatchEvidence] = []
+        for evidence in match.evidence:
+            text = redact_sensitive_info(evidence.text).strip()
+            normalised_text = _normalise_for_evidence_check(text)
+            if not normalised_text:
+                continue
+            if evidence.source is EvidenceSource.resume and normalised_text in safe_resume:
+                structured_evidence.append(
+                    evidence.model_copy(update={"text": text, "fact_id": None})
+                )
+            elif (
+                evidence.source is EvidenceSource.user_confirmed
+                and evidence.fact_id in fact_text_by_id
+                and normalised_text in fact_text_by_id[evidence.fact_id]
+            ):
+                structured_evidence.append(evidence.model_copy(update={"text": text}))
+        known_structured_text = {
+            _normalise_for_evidence_check(item.text) for item in structured_evidence
+        }
+        for text in valid_evidence:
+            if _normalise_for_evidence_check(text) not in known_structured_text:
+                structured_evidence.append(
+                    MatchEvidence(source=EvidenceSource.resume, text=text, fact_id=None)
+                )
 
         status = match.status
         explanation = match.explanation
-        if status in {MatchStatus.matched, MatchStatus.partial} and not valid_evidence:
+        if status in {MatchStatus.matched, MatchStatus.partial} and not structured_evidence:
             status = MatchStatus.unknown
             explanation = (
                 "模型未提供可在简历原文中验证的证据，系统已保守调整为待确认。"
@@ -80,23 +116,24 @@ def validate_and_sanitise_matches(
                 update={
                     "status": status,
                     "resume_evidence": valid_evidence,
+                    "evidence": structured_evidence,
                     "explanation": explanation,
                 }
             )
         )
 
     valid_requirement_ids = set(expected_ids)
-    resume_numbers = _number_tokens(safe_resume)
+    source_numbers = _number_tokens(combined_source)
     valid_suggestions = []
     for suggestion in analysis.resume_suggestions:
         original_is_present = (
-            _normalise_for_evidence_check(suggestion.original_text) in safe_resume
+            _normalise_for_evidence_check(suggestion.original_text) in combined_source
         )
         ids_are_valid = bool(suggestion.requirement_ids) and set(
             suggestion.requirement_ids
         ).issubset(valid_requirement_ids)
         adds_numbers = not _number_tokens(suggestion.suggested_text).issubset(
-            resume_numbers
+            source_numbers
         )
         if original_is_present and ids_are_valid and not adds_numbers:
             valid_suggestions.append(suggestion)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Literal, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -64,6 +65,7 @@ class JobInput(BaseModel):
     job_title: str
     location: Optional[str] = None
     job_type: Optional[str] = None
+    job_url: Optional[str] = None
     jd_text: str
 
     @field_validator("company", "job_title")
@@ -73,11 +75,23 @@ class JobInput(BaseModel):
             raise ValueError("此项为必填项。")
         return value
 
-    @field_validator("location", "job_type", mode="before")
+    @field_validator("location", "job_type", "job_url", mode="before")
     @classmethod
     def normalise_optional_text(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("job_url")
+    @classmethod
+    def validate_job_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("必须是完整的 http:// 或 https:// 地址。")
+        if len(value) > 2_000:
+            raise ValueError("链接不能超过 2000 个字符。")
         return value
 
     @field_validator("jd_text")

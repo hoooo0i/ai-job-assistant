@@ -21,6 +21,7 @@ def test_accepts_valid_job_input_and_normalises_optional_fields() -> None:
         job_title="  数据分析实习生 ",
         location=" ",
         job_type="",
+        job_url=" https://jobs.example.com/role/123 ",
         jd_text=VALID_JD,
     )
 
@@ -28,6 +29,17 @@ def test_accepts_valid_job_input_and_normalises_optional_fields() -> None:
     assert job.job_title == "数据分析实习生"
     assert job.location is None
     assert job.job_type is None
+    assert job.job_url == "https://jobs.example.com/role/123"
+
+
+def test_rejects_invalid_job_url() -> None:
+    with pytest.raises(ValidationError):
+        JobInput(
+            company="示例公司",
+            job_title="分析师",
+            job_url="jobs.example.com/role/123",
+            jd_text=VALID_JD,
+        )
 
 
 @pytest.mark.parametrize("field", ["company", "job_title"])

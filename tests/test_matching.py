@@ -7,11 +7,13 @@ from src.matching import (
     validate_and_sanitise_matches,
 )
 from src.schemas import (
+    CandidateFact,
     JobProfile,
     JobRequirement,
     InterviewCategory,
     InterviewQuestion,
     MatchAnalysis,
+    MatchEvidence,
     MatchStatus,
     RequirementCategory,
     RequirementImportance,
@@ -185,6 +187,99 @@ def test_valid_evidence_allows_whitespace_differences() -> None:
     )
 
     assert sanitised.matches[0].status is MatchStatus.matched
+
+
+def test_user_confirmed_evidence_is_validated_against_its_fact() -> None:
+    job = JobProfile(
+        company="示例公司",
+        title="示例岗位",
+        location=None,
+        job_type=None,
+        responsibilities=[],
+        requirements=[requirement("req_001", RequirementImportance.must_have)],
+        domain_background=[],
+    )
+    fact = CandidateFact(
+        id="fact_001",
+        category=RequirementCategory.skill,
+        statement="Built a Python workflow for synthetic reporting.",
+        metrics="Processed 500 records.",
+        source_job_id="job_1",
+        source_requirement_text="Requirement req_001",
+    )
+    analysis = MatchAnalysis(
+        matches=[
+            RequirementMatch(
+                requirement_id="req_001",
+                status=MatchStatus.matched,
+                resume_evidence=[],
+                evidence=[
+                    MatchEvidence(
+                        source="user_confirmed",
+                        text="Built a Python workflow",
+                        fact_id=fact.id,
+                    )
+                ],
+                explanation="User supplied evidence.",
+                confidence=0.9,
+            )
+        ],
+        resume_suggestions=[
+            ResumeSuggestion(
+                original_text="Built a Python workflow",
+                suggested_text="Built a Python workflow processing 500 records.",
+                requirement_ids=["req_001"],
+                reason="Add confirmed scope.",
+                follow_up_question=None,
+            )
+        ],
+    )
+
+    sanitised = validate_and_sanitise_matches(
+        analysis,
+        job,
+        "Resume without this project.",
+        [fact],
+    )
+
+    assert sanitised.matches[0].status is MatchStatus.matched
+    assert sanitised.matches[0].evidence[0].source.value == "user_confirmed"
+    assert len(sanitised.resume_suggestions) == 1
+
+
+def test_user_evidence_with_wrong_fact_id_is_rejected() -> None:
+    job = JobProfile(
+        company="示例公司",
+        title="示例岗位",
+        location=None,
+        job_type=None,
+        responsibilities=[],
+        requirements=[requirement("req_001", RequirementImportance.must_have)],
+        domain_background=[],
+    )
+    analysis = MatchAnalysis(
+        matches=[
+            RequirementMatch(
+                requirement_id="req_001",
+                status=MatchStatus.matched,
+                resume_evidence=[],
+                evidence=[
+                    MatchEvidence(
+                        source="user_confirmed",
+                        text="Invented fact",
+                        fact_id="fact_missing",
+                    )
+                ],
+                explanation="Unsupported.",
+                confidence=0.9,
+            )
+        ]
+    )
+
+    sanitised = validate_and_sanitise_matches(analysis, job, "Resume text.", [])
+
+    assert sanitised.matches[0].status is MatchStatus.unknown
+    assert sanitised.matches[0].evidence == []
 
 
 def test_filters_unsupported_resume_suggestions_and_invalid_interview_links() -> None:

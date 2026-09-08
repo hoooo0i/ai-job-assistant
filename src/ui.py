@@ -161,7 +161,7 @@ def render_app_header(
     with st.container(key="app_header"):
         brand_column, navigation_column, job_column, count_column, theme_column = (
             st.columns(
-                [1.2, 3.25, 1.35, 0.65, 0.35],
+                [1.2, 3.25, 1.35, 0.65, 0.7],
                 gap="small",
                 vertical_alignment="center",
             )
@@ -186,6 +186,7 @@ def render_app_header(
                 st.write(str(model_call_count))
         with theme_column:
             with st.container(key="header_theme"):
+                st.caption("切换模式")
                 dark_mode = st.toggle(
                     "深色主题",
                     key="ui_theme_dark",

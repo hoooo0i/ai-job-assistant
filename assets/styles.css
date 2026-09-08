@@ -499,6 +499,7 @@ hr {
   .st-key-app_header {
     position: relative;
     padding: 0.7rem;
+    margin-top: 3.4rem;
     margin-bottom: 0.8rem;
     border-radius: 14px;
   }
@@ -518,17 +519,27 @@ hr {
   .st-key-app_header [data-testid="stColumn"]:has(.st-key-header_theme),
   .st-key-app_header [data-testid="column"]:has(.st-key-header_theme) {
     position: absolute;
-    top: 0.75rem;
+    top: 0.55rem;
     right: 0.7rem;
-    width: 2.8rem !important;
+    width: 4.8rem !important;
   }
 
   .st-key-header_theme {
     position: absolute;
-    top: 0.75rem;
+    top: 0.55rem;
     right: 0.7rem;
-    width: 2.8rem;
+    width: 4.8rem;
     z-index: 2;
+  }
+
+  .st-key-header_theme [data-testid="stCaptionContainer"] {
+    margin: 0 0 0.15rem !important;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .st-key-header_theme [data-testid="stSwitch"] {
+    justify-content: center;
   }
 
   .st-key-primary_navigation,

@@ -60,6 +60,9 @@ def _workspace() -> tuple[dict, dict[str, dict]]:
             "final_analysis": final.model_dump(mode="json"),
             "report_files": {"docx": b"private", "pdf": b"private"},
             "tailored_resume_file": {"docx": b"private"},
+            "interview_copilot_records": [
+                {"transcript": "private interviewer speech"}
+            ],
             "application_tracking": {
                 "status": "applied",
                 "applied_on": "2026-09-05",
@@ -92,6 +95,8 @@ def test_archive_is_redacted_json_and_excludes_binary_caches() -> None:
     assert "12 Smith Street" not in text
     assert "report_files" not in text
     assert "tailored_resume_file" not in text
+    assert "private interviewer speech" not in text
+    assert "interview_copilot_records" not in text
     assert payload["candidate_profile"]["filename"] == "已导入档案简历.pdf"
 
 

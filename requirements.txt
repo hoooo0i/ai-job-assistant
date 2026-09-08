@@ -1,4 +1,6 @@
-streamlit>=1.41,<2
+streamlit>=1.62,<2
+streamlit-webrtc>=0.77,<1
+altair>=5.5,<7
 PyMuPDF>=1.24,<2
 pydantic>=2.10,<3
 python-dotenv>=1.0,<2
@@ -8,3 +10,4 @@ reportlab>=4.2,<5
 pytest>=8.3,<9
 beautifulsoup4>=4.12,<5
 httpx>=0.27,<1
+pycryptodome>=3.20,<4

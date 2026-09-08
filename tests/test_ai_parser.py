@@ -9,6 +9,7 @@ from src.ai_parser import (
     create_openai_client,
     finalize_match_requirements,
     generate_cover_letter,
+    generate_interview_copilot_guidance,
     generate_supplement_resume_suggestions,
     get_model_name,
     match_requirements,
@@ -26,6 +27,7 @@ from src.schemas import (
     CoverLetterParagraph,
     EvidenceChunk,
     InterviewCategory,
+    InterviewCopilotGuidance,
     InterviewFeedback,
     InterviewQuestion,
     JobProfile,
@@ -454,6 +456,48 @@ def test_review_interview_answer_rejects_short_content() -> None:
             empty_job_profile(),
             [],
         )
+
+
+def test_interview_copilot_returns_fragments_and_valid_evidence_only() -> None:
+    resume = empty_resume_profile().model_copy(
+        update={
+            "evidence_chunks": [
+                EvidenceChunk(
+                    source_section="项目",
+                    text="Used Python to build a dashboard for synthetic sales data.",
+                )
+            ]
+        }
+    )
+    guidance = InterviewCopilotGuidance(
+        detected_question="请介绍一个 Python 数据项目。",
+        question_type="project_deep_dive",
+        answer_framework=["项目背景", "具体行动", "结果与反思"],
+        talking_points=[
+            "Python 数据看板",
+            "性能提升 50%",
+        ],
+        evidence_ids=["ev_001", "ev_missing"],
+        missing_information=[],
+        caution_notes=[],
+    )
+    client = FakeClient(guidance)
+
+    result, evidence = generate_interview_copilot_guidance(
+        "请介绍一个 Python 数据项目。 candidate@example.test",
+        resume,
+        empty_job_profile(),
+        MatchAnalysis(matches=[]),
+        client=client,
+    )
+
+    call = client.responses.calls[0]
+    assert call["text_format"] is InterviewCopilotGuidance
+    assert "candidate@example.test" not in call["input"][0]["content"]
+    assert result.evidence_ids == ["ev_001"]
+    assert result.talking_points == ["Python 数据看板"]
+    assert "不存在的数字" in result.caution_notes[0]
+    assert evidence[0].id == "ev_001"
 
 
 def test_cover_letter_removes_paragraph_with_unsupported_number() -> None:

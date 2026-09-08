@@ -376,6 +376,7 @@ def invalidate_generated_materials(job_analysis: dict) -> None:
         "cover_letters",
         "interview_preparations",
         "interview_feedback",
+        "interview_copilot_records",
         "report_files",
         "application_package",
     ]:

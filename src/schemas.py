@@ -262,6 +262,22 @@ class InterviewFeedback(StrictSchemaModel):
     follow_up_question: Optional[str]
 
 
+class InterviewCopilotGuidance(StrictSchemaModel):
+    detected_question: str
+    question_type: Literal[
+        "job_knowledge",
+        "behavioral",
+        "project_deep_dive",
+        "capability_gap",
+        "other",
+    ]
+    answer_framework: list[str]
+    talking_points: list[str]
+    evidence_ids: list[str]
+    missing_information: list[str]
+    caution_notes: list[str]
+
+
 class CoverLetterParagraph(StrictSchemaModel):
     text: str
     evidence_ids: list[str]
@@ -352,3 +368,13 @@ class JobLinkResult(StrictSchemaModel):
     location: str = ""
     job_type: str = ""
     description: str
+    extraction_method: Literal[
+        "bytedance_api",
+        "greenhouse_api",
+        "moka_api",
+        "schema_org",
+        "embedded_json",
+        "page_content",
+        "tencent_api",
+        "xiaomi_api",
+    ] = "page_content"

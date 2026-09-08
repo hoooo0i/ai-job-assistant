@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from src.privacy import redact_sensitive_info
 from src.schemas import (
+    InterviewCopilotGuidance,
     InterviewPreparation,
     InterviewQuestion,
     MatchAnalysis,
@@ -78,6 +79,67 @@ def collect_interview_evidence(
         if len(evidence) >= MAX_EVIDENCE_ITEMS:
             break
     return evidence
+
+
+def collect_copilot_evidence(
+    resume_profile: ResumeProfile,
+    analysis: MatchAnalysis,
+) -> list[InterviewEvidence]:
+    """Collect a small evidence set for live prompts without retaining audio."""
+    synthetic_question = InterviewQuestion(
+        category="job_knowledge",
+        question="实时面试问题",
+        why_asked="为即时提示收集可核对证据。",
+        answer_outline=[],
+        requirement_ids=[item.requirement_id for item in analysis.matches],
+    )
+    return collect_interview_evidence(synthetic_question, resume_profile, analysis)
+
+
+def sanitise_copilot_guidance(
+    guidance: InterviewCopilotGuidance,
+    evidence: list[InterviewEvidence],
+) -> InterviewCopilotGuidance:
+    valid_ids = {item.id for item in evidence}
+    evidence_ids = list(
+        dict.fromkeys(
+            identifier for identifier in guidance.evidence_ids if identifier in valid_ids
+        )
+    )
+    selected_text = " ".join(
+        item.text for item in evidence if item.id in set(evidence_ids)
+    )
+    allowed_numbers = _number_tokens(selected_text)
+    talking_points: list[str] = []
+    removed_number = False
+    for point in guidance.talking_points:
+        if not _number_tokens(point).issubset(allowed_numbers):
+            removed_number = True
+            continue
+        talking_points.append(redact_sensitive_info(point).strip())
+    cautions = [redact_sensitive_info(item).strip() for item in guidance.caution_notes]
+    if removed_number:
+        cautions.append("已移除证据中不存在的数字，请只使用本人可核对数据。")
+    return guidance.model_copy(
+        update={
+            "detected_question": redact_sensitive_info(
+                guidance.detected_question
+            ).strip(),
+            "answer_framework": [
+                redact_sensitive_info(item).strip()
+                for item in guidance.answer_framework
+                if item.strip()
+            ],
+            "talking_points": [item for item in talking_points if item],
+            "evidence_ids": evidence_ids,
+            "missing_information": [
+                redact_sensitive_info(item).strip()
+                for item in guidance.missing_information
+                if item.strip()
+            ],
+            "caution_notes": list(dict.fromkeys(item for item in cautions if item)),
+        }
+    )
 
 
 def sanitise_interview_preparation(

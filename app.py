@@ -8,6 +8,7 @@ from typing import Any, Optional
 import streamlit as st
 from dotenv import load_dotenv
 from pydantic import ValidationError
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 from src.ai_parser import (
     AiParserError,
@@ -15,6 +16,7 @@ from src.ai_parser import (
     generate_supplement_resume_suggestions,
     get_model_name,
     generate_cover_letter,
+    generate_interview_copilot_guidance,
     has_api_key,
     parse_job,
     parse_resume,
@@ -57,7 +59,7 @@ from src.evidence_flow import (
     validate_clarification_answers,
 )
 from src.interview import InterviewEvidence, collect_interview_evidence
-from src.job_link import JobLinkError, fetch_job_posting
+from src.job_link import EXTRACTION_LABELS, JobLinkError, fetch_job_posting
 from src.matching import calculate_scores
 from src.pdf_parser import (
     EncryptedPdfError,
@@ -76,6 +78,12 @@ from src.reporting import (
     build_pdf_report,
     build_tailored_resume_docx,
 )
+from src.realtime_transcription import (
+    RealtimeAudioProcessor,
+    RealtimeTranscriptionSession,
+    looks_like_interview_question,
+    realtime_max_seconds,
+)
 from src.resume_versions import (
     ResumeVersionError,
     add_resume_version,
@@ -88,6 +96,7 @@ from src.schemas import (
     ClarificationAnswer,
     ClarificationQuestion,
     CoverLetterDraft,
+    InterviewCopilotGuidance,
     InterviewFeedback,
     InterviewPreparation,
     JobProfile,
@@ -107,6 +116,18 @@ from src.validators import (
     has_valid_resume_text,
     select_resume_text,
     validate_pdf_upload,
+)
+from src.ui import (
+    clear_session_preserving_ui_preferences,
+    apply_design_system,
+    count_pending_confirmations,
+    default_detail_section,
+    detail_sections,
+    initialise_ui_state,
+    normalise_selected_job_id,
+    render_app_header,
+    render_pill_navigation,
+    render_score_donut,
 )
 
 
@@ -169,13 +190,11 @@ def _save_active_job_analysis(job_analysis: dict) -> None:
 
 
 def _render_step_progress(active_step: int) -> None:
-    st.progress(active_step / len(STAGE_STEPS))
-    st.caption(
-        "  →  ".join(
-            f"**{index}. {label}**" if index == active_step else f"{index}. {label}"
-            for index, label in enumerate(STAGE_STEPS, start=1)
-        )
+    steps = "  /  ".join(
+        f"**{index}. {label}**" if index == active_step else f"{index}. {label}"
+        for index, label in enumerate(STAGE_STEPS, start=1)
     )
+    st.caption(f"当前步骤 {active_step}/{len(STAGE_STEPS)}  ·  {steps}")
 
 
 def _preview(text: str, limit: int) -> str:
@@ -489,6 +508,7 @@ def _invalidate_final_derivatives(bundle: dict) -> None:
         "cover_letters",
         "interview_preparations",
         "interview_feedback",
+        "interview_copilot_records",
         "report_files",
         "application_package",
     ]:
@@ -1140,105 +1160,425 @@ def _render_feedback(feedback: InterviewFeedback) -> None:
         st.info(f"建议继续练习：{feedback.follow_up_question}")
 
 
+def _render_copilot_guidance(latest: dict) -> None:
+    """Render evidence-bound guidance shared by live and manual modes."""
+    guidance = InterviewCopilotGuidance.model_validate(latest["guidance"])
+    evidence_by_id = {
+        item["id"]: item for item in latest.get("evidence", []) if item.get("id")
+    }
+    st.info(f"识别到的问题：{guidance.detected_question}")
+    columns = st.columns(2)
+    with columns[0]:
+        st.markdown("**回答结构**")
+        for item in guidance.answer_framework:
+            st.write(f"- {item}")
+    with columns[1]:
+        st.markdown("**可用要点**")
+        if guidance.talking_points:
+            for item in guidance.talking_points:
+                st.write(f"- {item}")
+        else:
+            st.caption("暂无足够证据支持的个人要点。")
+    if guidance.evidence_ids:
+        st.markdown("**真实证据提示**")
+        for identifier in guidance.evidence_ids:
+            item = evidence_by_id.get(identifier)
+            if item:
+                st.write(f"> [{item['source']}] {item['text']}")
+    if guidance.missing_information:
+        st.markdown("**不足与待补充**")
+        for item in guidance.missing_information:
+            st.write(f"- {item}")
+    for note in guidance.caution_notes:
+        st.warning(note)
+
+
+def _realtime_state_key(fingerprint: str) -> str:
+    return f"_copilot_live_state_{fingerprint}"
+
+
+def _realtime_worker_key(fingerprint: str) -> str:
+    return f"_copilot_live_worker_{fingerprint}"
+
+
+def _get_realtime_worker(fingerprint: str) -> RealtimeTranscriptionSession:
+    key = _realtime_worker_key(fingerprint)
+    worker = st.session_state.get(key)
+    if not isinstance(worker, RealtimeTranscriptionSession):
+        worker = RealtimeTranscriptionSession()
+        st.session_state[key] = worker
+    return worker
+
+
+def _get_realtime_state(fingerprint: str) -> dict:
+    return st.session_state.setdefault(
+        _realtime_state_key(fingerprint),
+        {
+            "status": "等待开启麦克风",
+            "partials": {},
+            "completed": [],
+            "analysed": [],
+            "session_counted": False,
+            "error": "",
+        },
+    )
+
+
+def _generate_copilot_record(
+    transcript: str,
+    bundle: dict,
+    resume_profile: ResumeProfile,
+    job_profile: JobProfile,
+    analysis: MatchAnalysis,
+) -> None:
+    guidance, evidence = generate_interview_copilot_guidance(
+        transcript,
+        resume_profile,
+        job_profile,
+        analysis,
+        provider=_create_counted_provider(),
+    )
+    records = bundle.setdefault("interview_copilot_records", [])
+    records.append(
+        {
+            "transcript": redact_sensitive_info(transcript),
+            "guidance": guidance.model_dump(mode="json"),
+            "evidence": [item.__dict__ for item in evidence],
+        }
+    )
+    bundle["interview_copilot_records"] = records[-10:]
+    _save_active_job_analysis(bundle)
+
+
+@st.fragment(run_every=1.0)
+def _render_realtime_updates(
+    job_id: str,
+    fingerprint: str,
+    auto_guidance: bool,
+) -> None:
+    worker = _get_realtime_worker(fingerprint)
+    live_state = _get_realtime_state(fingerprint)
+    for event in worker.drain_events():
+        event_type = event.get("type")
+        if event_type == "connected":
+            live_state["status"] = "实时转写已连接"
+            live_state["error"] = ""
+            if not live_state.get("session_counted"):
+                st.session_state["model_call_count"] = (
+                    st.session_state.get("model_call_count", 0) + 1
+                )
+                live_state["session_counted"] = True
+        elif event_type == "delta":
+            item_id = event.get("item_id", "current")
+            live_state["partials"][item_id] = (
+                live_state["partials"].get(item_id, "") + event.get("text", "")
+            )
+        elif event_type == "completed":
+            item_id = event.get("item_id", "current")
+            live_state["partials"].pop(item_id, None)
+            transcript = redact_sensitive_info(event.get("text", "")).strip()
+            if transcript and transcript not in live_state["completed"]:
+                live_state["completed"] = (
+                    live_state["completed"] + [transcript]
+                )[-12:]
+        elif event_type == "error":
+            live_state["error"] = event.get("text", "实时转写失败。")
+            live_state["status"] = "连接异常"
+        elif event_type == "limit":
+            live_state["error"] = event.get("text", "本次会话已结束。")
+        elif event_type == "stopped":
+            live_state["status"] = "实时转写已停止"
+
+    job_analyses = st.session_state.get("job_analyses", {})
+    candidate_profile = st.session_state.get("candidate_profile")
+    bundle = job_analyses.get(job_id)
+    if not bundle or not candidate_profile:
+        st.info("当前岗位会话已结束。")
+        return
+    resume_profile = ResumeProfile.model_validate(candidate_profile["resume_profile"])
+    job_profile = JobProfile.model_validate(bundle["job_profile"])
+    analysis = _bundle_analysis(bundle)
+
+    latest_turn = live_state["completed"][-1] if live_state["completed"] else ""
+    should_generate = (
+        auto_guidance
+        and latest_turn
+        and latest_turn not in live_state["analysed"]
+        and looks_like_interview_question(latest_turn)
+    )
+    manual_generate = False
+    if latest_turn and not auto_guidance:
+        manual_generate = st.button(
+            "为最新转写生成证据提示",
+            key=f"live_manual_generate_{fingerprint}",
+            use_container_width=True,
+        )
+    if should_generate or manual_generate:
+        live_state["analysed"] = (live_state["analysed"] + [latest_turn])[-20:]
+        try:
+            with st.spinner("已识别到面试问题，正在匹配简历证据……"):
+                _generate_copilot_record(
+                    latest_turn,
+                    bundle,
+                    resume_profile,
+                    job_profile,
+                    analysis,
+                )
+        except (AiParserError, AiProviderError) as exc:
+            live_state["error"] = str(exc)
+
+    status_icon = "🟢" if worker.running else "⚪"
+    st.caption(f"{status_icon} {live_state['status']}")
+    if live_state.get("error"):
+        st.error(live_state["error"])
+    partial_text = " ".join(live_state["partials"].values()).strip()
+    if partial_text:
+        st.markdown("**正在识别**")
+        st.info(redact_sensitive_info(partial_text))
+    if live_state["completed"]:
+        with st.expander("最近实时转写", expanded=False):
+            for turn in live_state["completed"][-5:]:
+                st.write(f"- {turn}")
+
+    records = bundle.get("interview_copilot_records", [])
+    if records:
+        st.markdown("### 最新即时提示")
+        _render_copilot_guidance(records[-1])
+        st.caption(f"当前会话已保留 {len(records)} 次提示，最多 10 次。")
+
+
+def _stop_realtime_workers() -> None:
+    for value in list(st.session_state.values()):
+        if isinstance(value, RealtimeTranscriptionSession):
+            value.stop()
+
+
+def _render_interview_copilot(
+    bundle: dict,
+    resume_profile: ResumeProfile,
+    job_profile: JobProfile,
+    analysis: MatchAnalysis,
+) -> None:
+    st.subheader("实时面试辅助")
+    st.caption(
+        "开启后会连续接收麦克风音频、实时显示转写，并在识别到问题时"
+        "自动给出回答结构、关键词和可核对证据；不需要逐段录制或上传。"
+    )
+    st.warning(
+        "只能在已获得所有面试参与者同意的情况下使用。"
+        "系统不生成整段代答；原始音频不会写入文件、岗位档案或下载报告。"
+    )
+    consent = st.checkbox(
+        "我确认已获得录音与实时转写所需的同意",
+        key=f"copilot_consent_{bundle['fingerprint']}",
+    )
+    auto_guidance = st.toggle(
+        "自动识别面试问题并生成证据提示",
+        value=True,
+        disabled=not consent,
+        key=f"copilot_auto_{bundle['fingerprint']}",
+        help="麦克风无法完全区分面试官和候选人；关闭后可手动确认最新转写。",
+    )
+    if consent:
+        worker = _get_realtime_worker(bundle["fingerprint"])
+        processor_key = f"_copilot_audio_processor_{bundle['fingerprint']}"
+        processor = st.session_state.get(processor_key)
+        if not isinstance(processor, RealtimeAudioProcessor):
+            processor = RealtimeAudioProcessor(worker)
+            st.session_state[processor_key] = processor
+        webrtc_streamer(
+            key=f"copilot_live_mic_{bundle['fingerprint']}",
+            mode=WebRtcMode.SENDONLY,
+            rtc_configuration={
+                "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+            },
+            media_stream_constraints={"video": False, "audio": True},
+            audio_frame_callback=processor,
+            on_audio_ended=worker.stop,
+            async_processing=True,
+            sendback_audio=False,
+        )
+        st.caption(
+            "点击上方 START 开始、STOP 停止。首次使用请允许浏览器访问麦克风。"
+            f"单次最长 {realtime_max_seconds() // 60} 分钟，停止后可再次开始。"
+        )
+        _render_realtime_updates(
+            bundle["job_id"],
+            bundle["fingerprint"],
+            auto_guidance,
+        )
+    else:
+        worker = st.session_state.get(_realtime_worker_key(bundle["fingerprint"]))
+        if isinstance(worker, RealtimeTranscriptionSession) and worker.running:
+            worker.stop()
+        st.info("勾选同意后才会显示实时麦克风开关。")
+
+    with st.expander("备用：手动输入面试问题"):
+        typed_question = st.text_area(
+            "输入面试官的问题",
+            height=100,
+            disabled=not consent,
+            placeholder="例如：请介绍一个你用数据推动产品决策的例子。",
+            key=f"copilot_typed_{bundle['fingerprint']}",
+        )
+        if st.button(
+            "生成证据提示",
+            type="primary",
+            disabled=(not consent or not typed_question.strip()),
+            key=f"copilot_generate_{bundle['fingerprint']}",
+        ):
+            try:
+                with st.spinner("正在匹配 JD 与简历证据……"):
+                    _generate_copilot_record(
+                        typed_question.strip(),
+                        bundle,
+                        resume_profile,
+                        job_profile,
+                        analysis,
+                    )
+                st.rerun()
+            except (AiParserError, AiProviderError) as exc:
+                st.error(str(exc))
+
+    records = bundle.get("interview_copilot_records", [])
+    if records and st.button(
+        "清空面试辅助记录",
+        key=f"copilot_clear_{bundle['fingerprint']}",
+    ):
+        bundle.pop("interview_copilot_records", None)
+        live_state = _get_realtime_state(bundle["fingerprint"])
+        live_state.update({"partials": {}, "completed": [], "analysed": []})
+        _save_active_job_analysis(bundle)
+        st.rerun()
+
+
 def _render_interview_center(
     bundle: dict,
     resume_profile: ResumeProfile,
     job_profile: JobProfile,
     analysis: MatchAnalysis,
 ) -> None:
-    st.caption(
-        "回答草稿要求基于简历证据，并校验证据编号和新增数字；"
-        "证据不足时不生成个性化回答。练习反馈仅保存在当前会话。"
-    )
-    if not analysis.interview_questions:
-        st.info("本次没有生成可用的面试问题。")
-        return
+    live_column, practice_column = st.columns([1.08, 1], gap="large")
+    with live_column:
+        with st.container(key="interview_live_panel"):
+            _render_interview_copilot(
+                bundle,
+                resume_profile,
+                job_profile,
+                analysis,
+            )
 
-    category_labels = {
-        "job_knowledge": "岗位知识",
-        "behavioral": "行为面试",
-        "project_deep_dive": "项目深挖",
-        "capability_gap": "能力缺口",
-    }
-    preparations = bundle.setdefault("interview_preparations", {})
-    feedback_records = bundle.setdefault("interview_feedback", {})
+    with practice_column:
+        with st.container(key="interview_practice_panel"):
+            st.subheader("题目练习与复盘")
+            st.caption(
+                "回答草稿要求基于简历证据，并校验证据编号和新增数字；"
+                "证据不足时不生成个性化回答。练习反馈仅保存在当前会话。"
+            )
+            if not analysis.interview_questions:
+                st.info("本次没有生成可用的面试问题。")
+                return
 
-    for index, question in enumerate(analysis.interview_questions, start=1):
-        key = str(index - 1)
-        category = category_labels[question.category.value]
-        with st.expander(f"{category} {index} · {question.question}", expanded=index == 1):
-            st.write(question.why_asked)
-            st.markdown("**基础答题思路**")
-            for item in question.answer_outline:
-                st.write(f"- {item}")
+            category_labels = {
+                "job_knowledge": "岗位知识",
+                "behavioral": "行为面试",
+                "project_deep_dive": "项目深挖",
+                "capability_gap": "能力缺口",
+            }
+            preparations = bundle.setdefault("interview_preparations", {})
+            feedback_records = bundle.setdefault("interview_feedback", {})
 
-            stored_preparation = preparations.get(key)
-            if not stored_preparation:
-                if st.button(
-                    "生成证据化回答思路",
-                    key=f"prepare_{bundle['fingerprint']}_{key}",
+            for index, question in enumerate(analysis.interview_questions, start=1):
+                key = str(index - 1)
+                category = category_labels[question.category.value]
+                with st.expander(
+                    f"{category} {index} · {question.question}",
+                    expanded=index == 1,
                 ):
-                    try:
-                        provider = _create_counted_provider()
-                        with st.spinner("正在根据简历证据准备回答……"):
-                            preparation, evidence = prepare_interview_answer(
+                    st.write(question.why_asked)
+                    st.markdown("**基础答题思路**")
+                    for item in question.answer_outline:
+                        st.write(f"- {item}")
+
+                    stored_preparation = preparations.get(key)
+                    if not stored_preparation:
+                        if st.button(
+                            "生成证据化回答思路",
+                            key=f"prepare_{bundle['fingerprint']}_{key}",
+                        ):
+                            try:
+                                provider = _create_counted_provider()
+                                with st.spinner("正在根据简历证据准备回答……"):
+                                    preparation, evidence = prepare_interview_answer(
+                                        question,
+                                        resume_profile,
+                                        analysis,
+                                        provider=provider,
+                                    )
+                                preparations[key] = {
+                                    "preparation": preparation.model_dump(mode="json"),
+                                    "evidence": [item.__dict__ for item in evidence],
+                                }
+                                _save_active_job_analysis(bundle)
+                                st.rerun()
+                            except (AiParserError, AiProviderError) as exc:
+                                st.error(str(exc))
+                    else:
+                        preparation = InterviewPreparation.model_validate(
+                            stored_preparation["preparation"]
+                        )
+                        _render_preparation(
+                            preparation,
+                            stored_preparation["evidence"],
+                        )
+
+                    with st.form(f"mock_interview_{bundle['fingerprint']}_{key}"):
+                        answer = st.text_area(
+                            "输入你的练习回答",
+                            key=f"mock_answer_{bundle['fingerprint']}_{key}",
+                            height=160,
+                            placeholder="建议至少 20 个字符，可按 STAR 结构回答……",
+                        )
+                        review_requested = st.form_submit_button("提交回答并获取点评")
+                    if review_requested:
+                        evidence = (
+                            [
+                                InterviewEvidence(**item)
+                                for item in stored_preparation["evidence"]
+                            ]
+                            if stored_preparation
+                            else collect_interview_evidence(
                                 question,
                                 resume_profile,
                                 analysis,
-                                provider=provider,
                             )
-                        preparations[key] = {
-                            "preparation": preparation.model_dump(mode="json"),
-                            "evidence": [item.__dict__ for item in evidence],
-                        }
-                        _save_active_job_analysis(bundle)
-                        st.rerun()
-                    except (AiParserError, AiProviderError) as exc:
-                        st.error(str(exc))
-            else:
-                preparation = InterviewPreparation.model_validate(
-                    stored_preparation["preparation"]
-                )
-                _render_preparation(preparation, stored_preparation["evidence"])
-
-            with st.form(f"mock_interview_{bundle['fingerprint']}_{key}"):
-                answer = st.text_area(
-                    "输入你的练习回答",
-                    key=f"mock_answer_{bundle['fingerprint']}_{key}",
-                    height=160,
-                    placeholder="建议至少 20 个字符，可按 STAR 结构回答……",
-                )
-                review_requested = st.form_submit_button("提交回答并获取点评")
-            if review_requested:
-                evidence = (
-                    [InterviewEvidence(**item) for item in stored_preparation["evidence"]]
-                    if stored_preparation
-                    else collect_interview_evidence(question, resume_profile, analysis)
-                )
-                try:
-                    provider = _create_counted_provider()
-                    with st.spinner("正在点评你的练习回答……"):
-                        feedback = review_interview_answer(
-                            question,
-                            answer,
-                            job_profile,
-                            evidence,
-                            provider=provider,
                         )
-                    feedback_records[key] = {
-                        "question": question.question,
-                        "feedback": feedback.model_dump(mode="json"),
-                    }
-                    _save_active_job_analysis(bundle)
-                    st.rerun()
-                except (AiParserError, AiProviderError) as exc:
-                    st.error(str(exc))
+                        try:
+                            provider = _create_counted_provider()
+                            with st.spinner("正在点评你的练习回答……"):
+                                feedback = review_interview_answer(
+                                    question,
+                                    answer,
+                                    job_profile,
+                                    evidence,
+                                    provider=provider,
+                                )
+                            feedback_records[key] = {
+                                "question": question.question,
+                                "feedback": feedback.model_dump(mode="json"),
+                            }
+                            _save_active_job_analysis(bundle)
+                            st.rerun()
+                        except (AiParserError, AiProviderError) as exc:
+                            st.error(str(exc))
 
-            if key in feedback_records:
-                st.markdown("### 本题复盘")
-                _render_feedback(
-                    InterviewFeedback.model_validate(feedback_records[key]["feedback"])
-                )
+                    if key in feedback_records:
+                        st.markdown("### 本题复盘")
+                        _render_feedback(
+                            InterviewFeedback.model_validate(
+                                feedback_records[key]["feedback"]
+                            )
+                        )
 
 
 def _render_report_download(
@@ -1492,7 +1832,12 @@ def _render_job_input_fields(prefix: str, index: int) -> dict[str, str]:
         f"岗位链接（岗位 {number}，选填）",
         placeholder="https://company.example/jobs/123",
         key=f"{prefix}_url_{index}",
-        help="可尝试读取公开招聘页；登录页、动态页面或反爬页面可能需要手动粘贴。",
+        help=(
+            "支持字节跳动、腾讯、小米、Moka、智联招聘及其他公开岗位详情页。"
+            "小米请先在职位列表打开具体岗位，再复制详情页链接；"
+            "Moka 请复制地址中包含 #/job/ 的具体岗位链接；"
+            "如网站要求登录或验证，请手动粘贴 JD。"
+        ),
     )
     if url_columns[1].button(
         "读取链接",
@@ -1513,7 +1858,20 @@ def _render_job_input_fields(prefix: str, index: int) -> dict[str, str]:
                     st.session_state[key] = value
             if imported.job_type in {"全职", "实习", "兼职", "合同", "其他"}:
                 st.session_state[f"{prefix}_type_{index}"] = imported.job_type
-            st.success(f"岗位 {number} 已从链接读取，请核对下方内容。")
+            method = EXTRACTION_LABELS.get(imported.extraction_method, "网页内容")
+            st.success(
+                f"岗位 {number} 已读取（{method}），请核对下方自动填写内容。"
+            )
+            missing = [
+                label
+                for label, value in (
+                    ("公司名称", imported.company),
+                    ("岗位名称", imported.title),
+                )
+                if not value
+            ]
+            if missing:
+                st.info(f"网页没有明确提供{'、'.join(missing)}，请手动补充。")
         except JobLinkError as exc:
             st.error(str(exc))
     columns = st.columns(2)
@@ -1630,73 +1988,343 @@ def _add_jobs_for_candidate(
     return len(additions), duplicates
 
 
+def _must_have_coverage(bundle: dict) -> float:
+    job_profile = JobProfile.model_validate(bundle["job_profile"])
+    analysis = _bundle_analysis(bundle)
+    matches = {item.requirement_id: item for item in analysis.matches}
+    must_have = [
+        item for item in job_profile.requirements if item.importance.value == "must_have"
+    ]
+    if not must_have:
+        return 100.0
+    weights = {
+        MatchStatus.matched: 1.0,
+        MatchStatus.partial: 0.5,
+        MatchStatus.missing: 0.0,
+        MatchStatus.unknown: 0.0,
+    }
+    covered = sum(
+        weights.get(matches[item.id].status, 0.0)
+        for item in must_have
+        if item.id in matches
+    )
+    return round(covered / len(must_have) * 100, 1)
+
+
+def _top_requirement_gaps(bundle: dict, limit: int = 2) -> list[str]:
+    job_profile = JobProfile.model_validate(bundle["job_profile"])
+    analysis = _bundle_analysis(bundle)
+    matches = {item.requirement_id: item for item in analysis.matches}
+    importance_rank = {"must_have": 0, "preferred": 1, "other": 2}
+    gaps = [
+        requirement
+        for requirement in job_profile.requirements
+        if requirement.id in matches
+        and matches[requirement.id].status
+        in {MatchStatus.missing, MatchStatus.unknown, MatchStatus.partial}
+    ]
+    gaps.sort(
+        key=lambda item: (
+            not item.is_hard_condition,
+            importance_rank.get(item.importance.value, 3),
+            item.normalized_name,
+        )
+    )
+    return [item.normalized_name for item in gaps[:limit]]
+
+
+def _job_risk_summary(item) -> str:
+    if item.hard_risks:
+        return f"{item.hard_risks} 项硬性风险"
+    if item.must_have_gaps:
+        return f"{item.must_have_gaps} 项必须能力缺口"
+    if item.stage != "final":
+        return "待补充确认"
+    return "暂无明显硬性风险"
+
+
+def _enter_job_detail(job_id: str) -> None:
+    st.session_state["active_job_id"] = job_id
+    st.session_state["workspace_section"] = "岗位"
+
+
+def _select_comparison_job(job_id: str) -> None:
+    st.session_state["comparison_selected_job_id"] = job_id
+
+
+def _return_to_job_workspace(job_id: str) -> None:
+    st.session_state["comparison_selected_job_id"] = job_id
+    st.session_state["workspace_section"] = "岗位"
+    st.session_state["active_job_id"] = None
+
+
+@st.dialog("添加岗位 JD", width="large")
+def _render_add_jobs_dialog(
+    candidate_profile: dict,
+    job_analyses: dict[str, dict],
+    remaining: int,
+) -> None:
+    st.caption(
+        f"当前还可添加 {remaining} 个岗位。新增岗位会复用现有简历解析结果。"
+    )
+    batch_prefix = f"additional_{len(job_analyses)}"
+    add_count = int(
+        st.number_input(
+            "本次添加岗位数量",
+            min_value=1,
+            max_value=remaining,
+            value=1,
+            step=1,
+            key=f"{batch_prefix}_count",
+        )
+    )
+    records = [
+        _render_job_input_fields(batch_prefix, index) for index in range(add_count)
+    ]
+    st.caption(
+        f"若均为新岗位，本次最多增加 {add_count * 2} 次模型调用；"
+        "简历解析不会重复调用。"
+    )
+    if not st.button(
+        "分析并加入对比",
+        type="primary",
+        icon=":material/add_task:",
+        use_container_width=True,
+    ):
+        return
+
+    jobs, errors = _validate_job_records(records)
+    if errors:
+        st.error("请修正以下问题：")
+        for error in errors:
+            st.write(f"- {error}")
+        return
+    if _jobs_need_model(
+        candidate_profile["resume_id"],
+        jobs,
+        resume_profile_available=True,
+    ) and not has_api_key():
+        st.error("尚未配置 OPENAI_API_KEY，无法分析新岗位。")
+        return
+    try:
+        with st.spinner("正在分析新增岗位；简历解析结果将直接复用……"):
+            added, duplicates = _add_jobs_for_candidate(candidate_profile, jobs)
+        st.session_state["workspace_notice"] = (
+            f"已新增 {added} 个岗位。"
+            + (f"另有 {duplicates} 个重复岗位已跳过。" if duplicates else "")
+        )
+        st.rerun()
+    except (AiParserError, AiProviderError) as exc:
+        st.error(str(exc))
+
+
+@st.fragment
+def _render_job_decision_board(
+    candidate_profile: dict,
+    job_analyses: dict[str, dict],
+    comparison: list,
+) -> None:
+    job_ids = [item.job_id for item in comparison]
+    selected_job_id = normalise_selected_job_id(
+        job_ids,
+        st.session_state.get("comparison_selected_job_id"),
+    )
+    st.session_state["comparison_selected_job_id"] = selected_job_id
+    if not selected_job_id:
+        st.info("还没有可比较的岗位。")
+        return
+
+    list_column, detail_column = st.columns([1.85, 1.05], gap="large")
+    with list_column:
+        with st.container(key="job_board_list"):
+            with st.container(key="job_board_header"):
+                header = st.columns([0.45, 2.15, 1, 1.2, 1.3, 0.8])
+                for column, label in zip(
+                    header,
+                    ["排名", "岗位信息", "总体匹配", "必须项覆盖", "关键风险", "操作"],
+                ):
+                    column.caption(label)
+
+            for index, item in enumerate(comparison, start=1):
+                selected = item.job_id == selected_job_id
+                container_key = (
+                    "job_row_selected" if selected else f"job_row_{item.job_id[:10]}"
+                )
+                with st.container(key=container_key):
+                    columns = st.columns([0.45, 2.15, 1, 1.2, 1.3, 0.8])
+                    columns[0].markdown(f"### {index}")
+                    columns[1].markdown(f"**{item.title}**")
+                    columns[1].caption(
+                        f"{item.company} · "
+                        f"{APPLICATION_STATUS_LABELS[ApplicationStatus(item.application_status)]}"
+                    )
+                    columns[2].metric(
+                        "匹配",
+                        "--" if item.match_score is None else f"{item.match_score:.0f}%",
+                        label_visibility="collapsed",
+                    )
+                    coverage = _must_have_coverage(job_analyses[item.job_id])
+                    columns[3].write(f"**{coverage:.0f}%**")
+                    columns[3].progress(coverage / 100)
+                    columns[4].write(_job_risk_summary(item))
+                    columns[4].caption(
+                        "最终分析" if item.stage == "final" else "待补充确认"
+                    )
+                    columns[5].button(
+                        "已选择" if selected else "预览",
+                        key=f"preview_job_{item.job_id}",
+                        disabled=selected,
+                        use_container_width=True,
+                        on_click=_select_comparison_job,
+                        args=(item.job_id,),
+                    )
+
+    selected_item = next(
+        item for item in comparison if item.job_id == selected_job_id
+    )
+    selected_bundle = job_analyses[selected_job_id]
+    selected_profile = JobProfile.model_validate(selected_bundle["job_profile"])
+    selected_analysis = _bundle_analysis(selected_bundle)
+    selected_score = calculate_scores(selected_profile, selected_analysis)
+    with detail_column:
+        with st.container(key="selected_job_panel"):
+            st.caption("当前选择")
+            st.markdown(f"## {selected_profile.title}")
+            st.write(
+                " · ".join(
+                    value
+                    for value in [
+                        selected_profile.company,
+                        selected_profile.location,
+                        selected_profile.job_type,
+                    ]
+                    if value
+                )
+            )
+            render_score_donut(selected_score.match_score)
+            metric_columns = st.columns(3)
+            metric_columns[0].metric(
+                "必须项",
+                f"{_must_have_coverage(selected_bundle):.0f}%",
+            )
+            metric_columns[1].metric(
+                "完整度", f"{selected_score.information_completeness:.0f}%"
+            )
+            metric_columns[2].metric("ATS", f"{selected_item.ats_score}")
+
+            if selected_item.recommendation_score >= 75:
+                recommendation = "匹配度较高，建议优先投入并针对关键差距优化。"
+            elif selected_item.recommendation_score >= 55:
+                recommendation = "具备一定基础，建议先补强高影响证据再投递。"
+            else:
+                recommendation = "当前差距较明显，建议先核对硬性条件与投入成本。"
+            st.info(f"AI 建议：{recommendation}")
+
+            gaps = _top_requirement_gaps(selected_bundle)
+            st.markdown("#### 关键差距")
+            if gaps:
+                for index, gap in enumerate(gaps, start=1):
+                    st.write(f"{index}. {gap}")
+            else:
+                st.success("当前未发现高优先级缺口。")
+
+            enter_label = (
+                "进入详细分析"
+                if selected_item.stage == "final"
+                else "进入补充确认"
+            )
+            if st.button(
+                enter_label,
+                key=f"enter_job_{selected_job_id}",
+                type="primary",
+                icon=":material/arrow_forward:",
+                icon_position="right",
+                use_container_width=True,
+            ):
+                _enter_job_detail(selected_job_id)
+                # This control lives inside a fragment so its default rerun would
+                # only repaint the decision board. Entering a job changes the app
+                # route and therefore requires an explicit full-app rerun.
+                st.rerun(scope="app")
+
+
 def _render_job_workspace(candidate_profile: dict, job_analyses: dict[str, dict]) -> None:
-    st.subheader("岗位对比工作台")
     notice = st.session_state.pop("workspace_notice", None)
     if notice:
         st.success(notice)
-    st.caption(
-        f"当前简历：{candidate_profile.get('filename', '已解析简历')} ｜ "
-        f"已分析 {len(job_analyses)}/{MAX_JOBS_PER_SESSION} 个岗位。"
-    )
-    tracking_metrics = build_application_metrics(job_analyses)
-    metric_columns = st.columns(5)
-    metric_columns[0].metric("岗位总数", tracking_metrics.total_jobs)
-    metric_columns[1].metric("已投递", tracking_metrics.submitted)
-    metric_columns[2].metric("回复率", f"{tracking_metrics.response_rate:.1f}%")
-    metric_columns[3].metric("面试率", f"{tracking_metrics.interview_rate:.1f}%")
-    metric_columns[4].metric("Offer", tracking_metrics.offers)
-    actions = upcoming_application_actions(job_analyses)
-    if actions:
-        with st.expander(f"截止日期与跟进提醒 · {len(actions)} 项", expanded=True):
-            st.caption("显示已逾期或未来 30 天内的申请截止、面试和跟进日期。")
-            for action in actions:
-                icon = "🔴" if action["timing"] == "已逾期" else "🗓️"
-                st.write(
-                    f"{icon} {action['date']} · {action['kind']} · "
-                    f"{action['company']} · {action['title']}（{action['timing']}）"
-                )
-    comparison = build_job_comparison(candidate_profile, job_analyses)
-    display_rows = [
-        {
-            "公司": item.company,
-            "岗位": item.title,
-            "阶段": "最终分析" if item.stage == "final" else "待补充确认",
-            "投递状态": APPLICATION_STATUS_LABELS[
-                ApplicationStatus(item.application_status)
-            ],
-            "匹配度": "--" if item.match_score is None else f"{item.match_score:.1f}%",
-            "完整度": f"{item.information_completeness:.1f}%",
-            "ATS": f"{item.ats_score}/100",
-            "硬性风险": item.hard_risks,
-            "必须项缺口": item.must_have_gaps,
-            "推荐值": item.recommendation_score,
-        }
-        for item in comparison
-    ]
-    st.warning("推荐值由本地规则计算，用于整理投递顺序，不代表录取概率。")
-    st.dataframe(
-        display_rows,
-        hide_index=True,
-        use_container_width=True,
-    )
 
-    comparison_source = [item.model_dump(mode="json") for item in comparison]
-    comparison_version = hashlib.sha256(
-        json.dumps(comparison_source, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    comparison_files = st.session_state.get("comparison_report_files", {})
-    if comparison_files.get("version") != comparison_version:
-        comparison_files = {
-            "version": comparison_version,
-            "docx": build_job_comparison_docx(comparison),
-            "pdf": build_job_comparison_pdf(comparison),
-        }
-        st.session_state["comparison_report_files"] = comparison_files
-    with st.expander("下载对比报告与备份档案"):
+    comparison = build_job_comparison(candidate_profile, job_analyses)
+    highest_match = max(
+        (item.match_score for item in comparison if item.match_score is not None),
+        default=None,
+    )
+    pending = count_pending_confirmations(job_analyses.values())
+    remaining = MAX_JOBS_PER_SESSION - len(job_analyses)
+
+    with st.container(key="workspace_hero"):
+        title_column, action_column = st.columns(
+            [4, 1], vertical_alignment="bottom"
+        )
+        with title_column:
+            st.title("选择最值得投入的岗位")
+            st.caption(
+                f"基于 {candidate_profile.get('filename', '当前简历')} 的证据匹配，"
+                "先比较机会，再进入单个岗位精细优化。"
+            )
+        with action_column:
+            if remaining > 0 and st.button(
+                "添加岗位 JD",
+                icon=":material/add:",
+                use_container_width=True,
+            ):
+                _render_add_jobs_dialog(candidate_profile, job_analyses, remaining)
+
+    with st.container(key="workspace_metrics"):
+        metric_columns = st.columns(3)
+        metric_columns[0].metric("已分析", f"{len(comparison)} 个岗位")
+        metric_columns[1].metric(
+            "最高匹配",
+            "--" if highest_match is None else f"{highest_match:.0f}%",
+        )
+        metric_columns[2].metric("待确认", f"{pending} 项")
+
+    st.caption("推荐排序由本地规则计算，仅用于安排投递优先级，不代表录取概率。")
+    _render_job_decision_board(candidate_profile, job_analyses, comparison)
+
+    tracking_metrics = build_application_metrics(job_analyses)
+    actions = upcoming_application_actions(job_analyses)
+    with st.expander("投递进度、提醒与下载"):
+        metric_columns = st.columns(5)
+        metric_columns[0].metric("岗位总数", tracking_metrics.total_jobs)
+        metric_columns[1].metric("已投递", tracking_metrics.submitted)
+        metric_columns[2].metric("回复率", f"{tracking_metrics.response_rate:.1f}%")
+        metric_columns[3].metric("面试率", f"{tracking_metrics.interview_rate:.1f}%")
+        metric_columns[4].metric("Offer", tracking_metrics.offers)
+        if actions:
+            st.markdown("#### 近期提醒")
+            for action in actions:
+                timing = "已逾期" if action["timing"] == "已逾期" else action["timing"]
+                st.write(
+                    f"{action['date']} · {action['kind']} · "
+                    f"{action['company']} · {action['title']}（{timing}）"
+                )
+
+        comparison_source = [item.model_dump(mode="json") for item in comparison]
+        comparison_version = hashlib.sha256(
+            json.dumps(
+                comparison_source, ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+        ).hexdigest()
+        comparison_files = st.session_state.get("comparison_report_files", {})
+        if comparison_files.get("version") != comparison_version:
+            comparison_files = {
+                "version": comparison_version,
+                "docx": build_job_comparison_docx(comparison),
+                "pdf": build_job_comparison_pdf(comparison),
+            }
+            st.session_state["comparison_report_files"] = comparison_files
         st.caption(
-            "对比报告不包含原始简历全文。求职档案是脱敏 JSON，保存分析记录、"
-            "补充事实和简历版本信息；文件由浏览器下载，本应用不会自动长期保存。"
+            "报告不包含原始简历全文；脱敏档案由浏览器下载，本应用不会自动长期保存。"
         )
         download_columns = st.columns(3)
         download_columns[0].download_button(
@@ -1725,99 +2353,73 @@ def _render_job_workspace(candidate_profile: dict, job_analyses: dict[str, dict]
         except WorkspaceArchiveError as exc:
             st.error(str(exc))
 
-    st.markdown("### 选择岗位进入详细流程")
-    for index, item in enumerate(comparison, start=1):
-        columns = st.columns([4, 1])
-        columns[0].write(
-            f"**{index}. {item.company} · {item.title}**  "
-            f"推荐值 {item.recommendation_score:.1f} · "
-            f"{APPLICATION_STATUS_LABELS[ApplicationStatus(item.application_status)]}"
-        )
-        if columns[1].button(
-            "打开岗位",
-            key=f"open_job_{item.job_id}",
-            use_container_width=True,
-        ):
-            st.session_state["active_job_id"] = item.job_id
-            st.rerun()
-
-    remaining = MAX_JOBS_PER_SESSION - len(job_analyses)
-    if remaining > 0:
-        with st.expander("继续添加岗位 JD"):
-            batch_prefix = f"additional_{len(job_analyses)}"
-            add_count = int(
-                st.number_input(
-                    "本次添加岗位数量",
-                    min_value=1,
-                    max_value=remaining,
-                    value=1,
-                    step=1,
-                    key=f"{batch_prefix}_count",
-                )
-            )
-            records = [
-                _render_job_input_fields(batch_prefix, index)
-                for index in range(add_count)
-            ]
-            st.caption(
-                f"若均为新岗位，本次最多增加 {add_count * 2} 次模型调用；"
-                "简历解析不会重复调用。"
-            )
-            if st.button("分析并加入对比", type="primary", use_container_width=True):
-                jobs, errors = _validate_job_records(records)
-                if errors:
-                    st.error("请修正以下问题：")
-                    for error in errors:
-                        st.write(f"- {error}")
-                elif _jobs_need_model(
-                    candidate_profile["resume_id"],
-                    jobs,
-                    resume_profile_available=True,
-                ) and not has_api_key():
-                    st.error("尚未配置 OPENAI_API_KEY，无法分析新岗位。")
-                else:
-                    try:
-                        with st.spinner("正在分析新增岗位；简历解析结果将直接复用……"):
-                            added, duplicates = _add_jobs_for_candidate(candidate_profile, jobs)
-                        st.session_state["workspace_notice"] = (
-                            f"已新增 {added} 个岗位。"
-                            + (f"另有 {duplicates} 个重复岗位已跳过。" if duplicates else "")
-                        )
-                        st.rerun()
-                    except (AiParserError, AiProviderError) as exc:
-                        st.error(str(exc))
-    else:
+    if remaining <= 0:
         st.info("当前会话已达到 5 个岗位的比较上限。")
 
-    if st.button("上传新简历并清空当前工作台"):
-        st.session_state.clear()
+    if st.button(
+        "上传新简历并清空当前工作台",
+        type="tertiary",
+        icon=":material/restart_alt:",
+    ):
+        _stop_realtime_workers()
+        clear_session_preserving_ui_preferences()
         st.rerun()
 
 
-def _render_final_results(bundle: dict, candidate_profile: dict) -> None:
+def _render_final_results(
+    bundle: dict,
+    candidate_profile: dict,
+    active_group: str,
+) -> None:
     resume_profile = ResumeProfile.model_validate(candidate_profile["resume_profile"])
     job_profile = JobProfile.model_validate(bundle["job_profile"])
     match_analysis = MatchAnalysis.model_validate(bundle["final_analysis"])
     score = calculate_scores(job_profile, match_analysis)
 
-    _render_step_progress(4)
-    st.subheader("第 4 步：最终建议与材料")
     workspace_notice = st.session_state.pop("workspace_notice", None)
     if workspace_notice:
         st.success(workspace_notice)
-    action_columns = st.columns(3)
-    if action_columns[0].button("返回岗位对比", use_container_width=True):
-        st.session_state["active_job_id"] = None
-        st.rerun()
-    if action_columns[1].button("修改补充信息", use_container_width=True):
+
+    st.caption("分析流程  /  上传资料  /  初步匹配  /  补充真实信息  /  最终建议")
+    title_column, score_column = st.columns([4, 1], vertical_alignment="bottom")
+    with title_column:
+        st.title(f"{job_profile.title} · {job_profile.company}")
+        st.caption(
+            "分析已完成。所有评分均基于简历证据与用户明确确认的信息。"
+        )
+    with score_column:
+        st.metric(
+            "证据匹配度",
+            "--" if score.match_score is None else f"{score.match_score:.0f}%",
+        )
+
+    with st.container(key="detail_actions"):
+        action_columns = st.columns(3)
+    action_columns[0].button(
+        "返回岗位对比",
+        icon=":material/arrow_back:",
+        use_container_width=True,
+        on_click=_return_to_job_workspace,
+        args=(bundle["job_id"],),
+    )
+    if action_columns[1].button(
+        "修改补充信息",
+        icon=":material/edit_note:",
+        use_container_width=True,
+    ):
         # Keep the current final result available until the user actually submits
         # changed answers. This makes entering the edit screen fully reversible.
         bundle["stage"] = "clarification"
         bundle["editing_clarifications"] = True
         _save_active_job_analysis(bundle)
         st.rerun()
-    if action_columns[2].button("重新开始", use_container_width=True):
-        st.session_state.clear()
+    if action_columns[2].button(
+        "重新开始",
+        icon=":material/restart_alt:",
+        use_container_width=True,
+    ):
+        _stop_realtime_workers()
+        clear_session_preserving_ui_preferences()
         st.rerun()
 
     job_facts = [
@@ -1833,27 +2435,19 @@ def _render_final_results(bundle: dict, candidate_profile: dict) -> None:
                 if fact.metrics:
                     st.caption(f"成果或数据：{fact.metrics}")
 
-    sections = [
-        "岗位匹配",
-        "关键词缺口",
-        "ATS 体检",
-        "简历优化",
-        "投递管理",
-        "材料包",
-        "求职信",
-        "面试准备",
-        "报告下载",
-        "简历结构",
-        "JD 结构",
-    ]
-    selected_section = st.segmented_control(
-        "选择功能",
-        sections,
-        default="岗位匹配",
-        key=f"final_section_{bundle['job_id']}",
-        selection_mode="single",
-    ) or "岗位匹配"
-    st.divider()
+    sections = detail_sections(active_group)
+    with st.container(key="detail_subnavigation"):
+        if len(sections) > 1:
+            selected_section = render_pill_navigation(
+                sections,
+                state_key=f"detail_section_{bundle['job_id']}_{active_group}",
+                default=default_detail_section(active_group),
+                container_key="secondary_navigation",
+            )
+        else:
+            selected_section = sections[0]
+            st.caption(f"当前功能 · {selected_section}")
+
     if selected_section == "岗位匹配":
         _render_match_analysis(match_analysis, score, job_profile)
     elif selected_section == "关键词缺口":
@@ -1882,7 +2476,7 @@ def _render_final_results(bundle: dict, candidate_profile: dict) -> None:
         )
     elif selected_section == "求职信":
         _render_cover_letter(bundle, resume_profile, job_profile, match_analysis)
-    elif selected_section == "面试准备":
+    elif selected_section == "面试辅助":
         _render_interview_center(bundle, resume_profile, job_profile, match_analysis)
     elif selected_section == "报告下载":
         _render_report_download(bundle, resume_profile, job_profile, match_analysis, score)
@@ -1890,7 +2484,13 @@ def _render_final_results(bundle: dict, candidate_profile: dict) -> None:
         _render_resume_profile(resume_profile)
     elif selected_section == "JD 结构":
         _render_job_profile(job_profile)
-    st.caption("本阶段不预测录取概率，不补写不存在的经历，也不使用 RAG 或长期保存数据。")
+        st.info(
+            "隐私说明：原始 PDF、提取文字和粘贴内容仅用于当前会话；"
+            "模型输入、预览和导出内容继续执行敏感信息脱敏。"
+        )
+    st.caption(
+        "本阶段不预测录取概率，不补写不存在的经历，也不使用 RAG 或长期保存数据。"
+    )
 
 
 def _complete_clarification(
@@ -1983,6 +2583,7 @@ def _complete_clarification(
     bundle["cover_letters"] = {}
     bundle["interview_preparations"] = {}
     bundle["interview_feedback"] = {}
+    bundle["interview_copilot_records"] = []
     _save_active_job_analysis(bundle)
     st.session_state["workspace_notice"] = (
         f"最终分析已在本地更新，其中包含 {len(replacement_facts)} 项用户确认信息，"
@@ -2108,7 +2709,8 @@ def _render_archive_import() -> None:
                 candidate, jobs = load_workspace_archive(
                     archive_file.getvalue() if archive_file is not None else b""
                 )
-                st.session_state.clear()
+                _stop_realtime_workers()
+                clear_session_preserving_ui_preferences()
                 st.session_state["candidate_profile"] = candidate
                 st.session_state["job_analyses"] = jobs
                 st.session_state["active_job_id"] = None
@@ -2123,79 +2725,147 @@ def _render_archive_import() -> None:
 
 def main() -> None:
     load_dotenv(override=True)
-    st.set_page_config(page_title="AI 求职助手", page_icon="📄", layout="centered")
-
-    st.title("AI 求职助手")
-    st.caption("交互式补充真实证据，再生成岗位匹配、简历、求职信与面试材料")
-    st.info(
-        "隐私说明：原始 PDF、提取文字和粘贴内容仅用于当前会话，不会被本应用长期保存。"
-        "预览中的电话、邮箱和详细地址会被自动脱敏。开始分析后，脱敏简历文本和岗位信息"
-        "将发送给 OpenAI 进行结构化解析，并在 API 请求中设置 store=False。"
+    st.set_page_config(
+        page_title="AI 求职助手",
+        page_icon=":material/work:",
+        layout="wide",
+        initial_sidebar_state="collapsed",
     )
-    st.caption(f"当前会话模型调用次数：{st.session_state.get('model_call_count', 0)}")
+    initialise_ui_state()
+    apply_design_system()
 
     active_job_id = st.session_state.get("active_job_id")
     job_analyses = st.session_state.setdefault("job_analyses", {})
     candidate_profile = st.session_state.get("candidate_profile")
+
+    active_job = (
+        job_analyses.get(active_job_id) if active_job_id in job_analyses else None
+    )
+    label_bundle = active_job
+    if label_bundle is None and job_analyses:
+        selected_for_label = st.session_state.get("comparison_selected_job_id")
+        label_bundle = job_analyses.get(selected_for_label)
+        if label_bundle is None:
+            label_bundle = next(iter(job_analyses.values()))
+    job_label = None
+    if label_bundle:
+        label_profile = JobProfile.model_validate(label_bundle["job_profile"])
+        job_label = f"{label_profile.title} · {label_profile.company}"
+
+    detail_is_ready = bool(
+        active_job
+        and active_job.get("stage") == "final"
+        and active_job.get("final_analysis")
+    )
+    navigation_enabled = bool(
+        candidate_profile and job_analyses and (active_job is None or detail_is_ready)
+    )
+    active_group = render_app_header(
+        job_label=job_label,
+        model_call_count=st.session_state.get("model_call_count", 0),
+        navigation_enabled=navigation_enabled,
+        force_group="岗位" if not navigation_enabled else None,
+    )
+
     if active_job_id and active_job_id in job_analyses and candidate_profile:
-        active_job = job_analyses[active_job_id]
-        if active_job.get("stage") == "final" and active_job.get("final_analysis"):
-            _render_final_results(active_job, candidate_profile)
+        assert active_job is not None
+        if detail_is_ready:
+            _render_final_results(active_job, candidate_profile, active_group)
         else:
             _render_clarification_stage(active_job, candidate_profile)
         return
     if candidate_profile and job_analyses:
+        if active_group != "岗位":
+            comparison_ids = [
+                item.job_id
+                for item in build_job_comparison(candidate_profile, job_analyses)
+            ]
+            selected_job_id = normalise_selected_job_id(
+                comparison_ids,
+                st.session_state.get("comparison_selected_job_id"),
+            )
+            if selected_job_id:
+                st.session_state["active_job_id"] = selected_job_id
+                st.rerun()
         _render_job_workspace(candidate_profile, job_analyses)
         return
 
+    st.title("从一份简历，开始比较机会")
+    st.caption("一次提交多个岗位，先比较投入价值，再进入单个岗位精细优化。")
     _render_archive_import()
     _render_step_progress(1)
-    st.subheader("第 1 步：上传简历并填写岗位")
+    resume_column, jobs_column = st.columns([1, 1.65], gap="large")
+    with resume_column:
+        with st.container(key="upload_panel"):
+            st.subheader("上传简历")
+            st.caption("优先读取文本型 PDF；文件上限为 10 MB。")
+            uploaded_file = st.file_uploader(
+                "上传一份 PDF 简历（必填）",
+                type=["pdf"],
+                accept_multiple_files=False,
+                key="resume_upload",
+            )
 
-    uploaded_file = st.file_uploader(
-        "上传一份 PDF 简历（必填，最大 10 MB）",
-        type=["pdf"],
-        accept_multiple_files=False,
-        key="resume_upload",
-    )
+            pdf_result, pdf_error = _parse_uploaded_pdf(uploaded_file)
+            pdf_text_is_valid = bool(
+                pdf_result and has_valid_resume_text(pdf_result.text)
+            )
 
-    pdf_result, pdf_error = _parse_uploaded_pdf(uploaded_file)
-    pdf_text_is_valid = bool(pdf_result and has_valid_resume_text(pdf_result.text))
+            if uploaded_file is None:
+                st.session_state["resume_fallback"] = ""
+            elif pdf_text_is_valid:
+                st.session_state["resume_fallback"] = ""
+                st.success(
+                    f"PDF 解析成功：共 {pdf_result.page_count} 页，将优先使用 PDF 文本。"
+                )
+            else:
+                if pdf_result is not None:
+                    pdf_error = "PDF 中提取到的有效文字少于 50 个字符。"
+                st.warning(
+                    f"{pdf_error or 'PDF 无法提取有效文字。'} "
+                    "请粘贴简历内容，或重新上传文本型 PDF。"
+                )
+                st.text_area(
+                    "粘贴简历内容（备用入口）",
+                    key="resume_fallback",
+                    height=220,
+                    placeholder="请粘贴至少 50 个非空白字符……",
+                    help=(
+                        "仅当 PDF 无法提取有效文字时使用。"
+                        "内容仅用于当前会话，不会被长期保存。"
+                    ),
+                )
+                st.caption(
+                    "粘贴内容不会被长期保存；重新上传有效 PDF 后将自动改用 PDF 文本。"
+                )
 
-    if uploaded_file is None:
-        st.session_state["resume_fallback"] = ""
-    elif pdf_text_is_valid:
-        st.session_state["resume_fallback"] = ""
-        st.success(f"PDF 解析成功：共 {pdf_result.page_count} 页，将优先使用 PDF 文本。")
-    else:
-        if pdf_result is not None:
-            pdf_error = "PDF 中提取到的有效文字少于 50 个字符。"
-        st.warning(
-            f"{pdf_error or 'PDF 无法提取有效文字。'} 请粘贴简历内容，或重新上传文本型 PDF。"
-        )
-        st.text_area(
-            "粘贴简历内容（备用入口）",
-            key="resume_fallback",
-            height=220,
-            placeholder="请粘贴至少 50 个非空白字符……",
-            help="仅当 PDF 无法提取有效文字时使用。内容仅用于当前会话，不会被长期保存。",
-        )
-        st.caption("粘贴内容不会被长期保存；若重新上传有效 PDF，将自动改用 PDF 文本。")
+            st.info("隐私保护已开启：原始文件不落盘，预览与模型输入会先脱敏。")
+            with st.expander("查看隐私与模型说明"):
+                st.write(
+                    "原始 PDF、提取文字和粘贴内容仅用于当前会话，不会被本应用长期保存。"
+                    "电话、邮箱和详细地址会被自动脱敏。开始分析后，脱敏简历文本和岗位信息"
+                    "将发送给 OpenAI，并设置 store=False。"
+                )
 
-    st.markdown("### 岗位信息")
-    job_count = int(
-        st.number_input(
-            "本次提交岗位数量",
-            min_value=1,
-            max_value=MAX_JOBS_PER_SESSION,
-            value=1,
-            step=1,
-            key="initial_job_count",
-        )
-    )
-    job_records = [
-        _render_job_input_fields("initial", index) for index in range(job_count)
-    ]
+    with jobs_column:
+        with st.container(key="job_input_panel"):
+            st.subheader("添加岗位")
+            st.caption("支持一次分析多份 JD，后续仍可继续补充岗位进行比较。")
+            job_count = int(
+                st.number_input(
+                    "本次提交岗位数量",
+                    min_value=1,
+                    max_value=MAX_JOBS_PER_SESSION,
+                    value=1,
+                    step=1,
+                    key="initial_job_count",
+                )
+            )
+            job_records = [
+                _render_job_input_fields("initial", index)
+                for index in range(job_count)
+            ]
+
     st.caption(
         f"全部为新内容时预计调用 {1 + job_count * 2} 次模型："
         "简历解析 1 次，每个 JD 解析和匹配各 1 次。缓存命中时会更少。"
@@ -2209,6 +2879,8 @@ def main() -> None:
     analysis_requested = st.button(
         "批量分析并进入岗位对比",
         type="primary",
+        icon=":material/analytics:",
+        icon_position="right",
         use_container_width=True,
     )
     if not analysis_requested:

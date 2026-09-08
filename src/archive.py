@@ -31,6 +31,7 @@ _RUNTIME_ONLY_KEYS = {
     "tailored_resume_file",
     "comparison_report_files",
     "application_package",
+    "interview_copilot_records",
 }
 
 

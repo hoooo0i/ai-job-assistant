@@ -77,6 +77,23 @@ def _clarification_state() -> tuple[dict, dict]:
     return candidate, bundle
 
 
+def _button(app: AppTest, label: str):
+    return next(item for item in app.button if item.label == label)
+
+
+def test_theme_toggle_persists_dark_mode() -> None:
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(app_path, default_timeout=30)
+
+    app.run()
+    app.toggle[0].set_value(True)
+    app.run()
+
+    assert not app.exception
+    assert app.session_state["ui_theme"] == "dark"
+    assert app.session_state["ui_theme_dark"] is True
+
+
 def test_clarification_step_uses_choices_only_and_finishes_without_model_call() -> None:
     candidate, bundle = _clarification_state()
     app_path = Path(__file__).resolve().parents[1] / "app.py"
@@ -90,7 +107,8 @@ def test_clarification_step_uses_choices_only_and_finishes_without_model_call() 
 
     assert not app.exception
     assert any(item.value == "第 3 步：补充真实信息" for item in app.subheader)
-    assert not app.segmented_control
+    for label in ["岗位", "简历", "投递", "面试", "更多"]:
+        assert _button(app, label).disabled is True
     assert not app.download_button
     assert not app.text_area
 
@@ -131,29 +149,32 @@ def test_final_step_exposes_results_and_downloads() -> None:
     app.run()
 
     assert not app.exception
-    navigation = app.segmented_control[0]
-    assert navigation.options[:4] == [
-        "岗位匹配",
-        "关键词缺口",
-        "ATS 体检",
-        "简历优化",
-    ]
-    assert "投递管理" in navigation.options
-    assert "材料包" in navigation.options
-    navigation.set_value("投递管理")
+    for label in ["岗位", "简历", "投递", "面试", "更多", "岗位匹配", "关键词缺口"]:
+        assert any(item.label == label for item in app.button)
+
+    _button(app, "投递").click()
     app.run()
     assert any(item.label == "保存投递记录" for item in app.button)
-    app.segmented_control[0].set_value("报告下载")
+    for label in ["投递管理", "材料包", "求职信", "报告下载"]:
+        assert any(item.label == label for item in app.button)
+    _button(app, "报告下载").click()
     app.run()
     assert {item.label for item in app.download_button} == {
         "下载 Word 报告",
         "下载 PDF 报告",
     }
-    app.segmented_control[0].set_value("材料包")
+    _button(app, "材料包").click()
     app.run()
     assert any(
         item.label == "下载当前投递材料包 ZIP"
         for item in app.download_button
+    )
+    _button(app, "面试").click()
+    app.run()
+    assert any(item.value == "实时面试辅助" for item in app.subheader)
+    assert any(
+        item.label == "我确认已获得录音与实时转写所需的同意"
+        for item in app.checkbox
     )
 
 
@@ -216,19 +237,44 @@ def test_workspace_compares_jobs_and_opens_detail_only_after_selection() -> None
     app.run()
 
     assert not app.exception
-    assert any(item.value == "岗位对比工作台" for item in app.subheader)
-    assert len([item for item in app.button if item.label == "打开岗位"]) == 2
+    assert any(item.value == "选择最值得投入的岗位" for item in app.title)
+    assert len([item for item in app.button if item.label == "预览"]) == 1
+    assert any(item.label == "已选择" for item in app.button)
     assert {item.label for item in app.download_button} == {
         "下载对比 Word",
         "下载对比 PDF",
         "导出脱敏档案",
     }
-    assert not app.segmented_control
-    next(item for item in app.button if item.label == "打开岗位").click()
+    next(item for item in app.button if item.label == "预览").click()
+    app.run()
+
+    assert app.session_state["active_job_id"] is None
+    assert app.session_state["comparison_selected_job_id"] == "job_2"
+    next(item for item in app.button if item.label == "进入补充确认").click()
     app.run()
 
     assert any(item.value == "第 3 步：补充真实信息" for item in app.subheader)
     assert len(app.session_state["job_analyses"]) == 2
+
+
+def test_workspace_add_job_dialog_opens_without_changing_active_job() -> None:
+    candidate, bundle = _clarification_state()
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(app_path, default_timeout=30)
+    app.session_state["candidate_profile"] = candidate
+    app.session_state["job_analyses"] = {"job_1": bundle}
+    app.session_state["active_job_id"] = None
+
+    app.run()
+    _button(app, "添加岗位 JD").click()
+    app.run()
+
+    assert not app.exception
+    assert app.session_state["active_job_id"] is None
+    assert any(
+        item.label == "本次添加岗位数量" for item in app.number_input
+    )
+    assert any(item.label == "分析并加入对比" for item in app.button)
 
 
 def test_final_detail_can_return_to_multi_job_workspace() -> None:
@@ -245,14 +291,67 @@ def test_final_detail_can_return_to_multi_job_workspace() -> None:
     app.session_state["candidate_profile"] = candidate
     app.session_state["job_analyses"] = {"job_1": bundle}
     app.session_state["active_job_id"] = "job_1"
+    app.session_state["ui_theme"] = "dark"
+    app.session_state["ui_theme_dark"] = True
 
     app.run()
     next(item for item in app.button if item.label == "返回岗位对比").click()
     app.run()
 
     assert not app.exception
-    assert any(item.value == "岗位对比工作台" for item in app.subheader)
+    assert any(item.value == "选择最值得投入的岗位" for item in app.title)
     assert app.session_state["active_job_id"] is None
+    assert app.session_state["ui_theme"] == "dark"
+    assert app.session_state["ui_theme_dark"] is True
+
+
+def test_restart_clears_analysis_but_preserves_dark_theme() -> None:
+    candidate, bundle = _clarification_state()
+    preliminary = PreliminaryAnalysis.model_validate(bundle["preliminary_analysis"])
+    bundle.update(
+        {
+            "stage": "final",
+            "final_analysis": MatchAnalysis(
+                matches=preliminary.matches
+            ).model_dump(mode="json"),
+        }
+    )
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(app_path, default_timeout=30)
+    app.session_state["candidate_profile"] = candidate
+    app.session_state["job_analyses"] = {"job_1": bundle}
+    app.session_state["active_job_id"] = "job_1"
+    app.session_state["ui_theme"] = "dark"
+    app.session_state["ui_theme_dark"] = True
+
+    app.run()
+    _button(app, "重新开始").click()
+    app.run()
+
+    assert not app.exception
+    assert "candidate_profile" not in app.session_state
+    assert app.session_state["ui_theme"] == "dark"
+    assert app.session_state["ui_theme_dark"] is True
+
+
+def test_new_resume_clears_workspace_but_preserves_dark_theme() -> None:
+    candidate, bundle = _clarification_state()
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(app_path, default_timeout=30)
+    app.session_state["candidate_profile"] = candidate
+    app.session_state["job_analyses"] = {"job_1": bundle}
+    app.session_state["active_job_id"] = None
+    app.session_state["ui_theme"] = "dark"
+    app.session_state["ui_theme_dark"] = True
+
+    app.run()
+    _button(app, "上传新简历并清空当前工作台").click()
+    app.run()
+
+    assert not app.exception
+    assert "candidate_profile" not in app.session_state
+    assert app.session_state["ui_theme"] == "dark"
+    assert app.session_state["ui_theme_dark"] is True
 
 
 def test_final_navigation_stays_on_current_section_after_button_error() -> None:
@@ -281,11 +380,12 @@ def test_final_navigation_stays_on_current_section_after_button_error() -> None:
     app.session_state["active_job_id"] = "job_1"
 
     app.run()
-    app.segmented_control[0].set_value("简历优化")
+    _button(app, "简历").click()
     app.run()
     next(item for item in app.button if item.label == "AI 批量优化已填写内容").click()
     app.run()
 
     assert not app.exception
-    assert app.segmented_control[0].value == "简历优化"
+    assert app.session_state["workspace_section"] == "简历"
+    assert app.session_state["detail_section_job_1_简历"] == "简历优化"
     assert any("请至少填写一项真实经历" in item.value for item in app.error)

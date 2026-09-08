@@ -1,4 +1,8 @@
-from src.interview import collect_interview_evidence, sanitise_interview_preparation
+from src.interview import (
+    collect_copilot_evidence,
+    collect_interview_evidence,
+    sanitise_interview_preparation,
+)
 from src.schemas import (
     EvidenceChunk,
     InterviewCategory,
@@ -76,6 +80,13 @@ def test_collects_related_evidence_first_and_deduplicates() -> None:
     assert len([item for item in evidence if "Python dashboard" in item.text]) == 1
     assert "candidate@example.test" not in evidence[1].text
     assert "[已隐藏邮箱]" in evidence[1].text
+
+
+def test_collects_general_evidence_for_copilot() -> None:
+    evidence = collect_copilot_evidence(resume_with_evidence(), analysis())
+
+    assert evidence[0].source == "简历·岗位要求 req_001"
+    assert any("Python dashboard" in item.text for item in evidence)
 
 
 def test_preparation_removes_unknown_evidence_ids() -> None:

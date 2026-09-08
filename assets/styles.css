@@ -1,0 +1,606 @@
+:root {
+  --ui-radius-canvas: 14px;
+  --ui-radius-panel: 14px;
+  --ui-radius-card: 14px;
+  --ui-radius-control: 14px;
+}
+
+html,
+body,
+[class*="css"] {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+}
+
+body {
+  color: var(--ui-text);
+}
+
+[data-testid="stAppViewContainer"] {
+  background: var(--ui-page);
+  color: var(--ui-text);
+}
+
+[data-testid="stHeader"] {
+  background: transparent;
+}
+
+[data-testid="stMain"] .block-container {
+  max-width: 1440px;
+  padding: 1.4rem 2rem 3rem;
+  background: var(--ui-canvas);
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-canvas);
+  box-shadow: 0 20px 60px var(--ui-shadow);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+label,
+[data-testid="stMarkdownContainer"] {
+  color: var(--ui-text);
+}
+
+h1 {
+  font-size: clamp(2rem, 3.2vw, 3rem) !important;
+  letter-spacing: -0.04em;
+  line-height: 1.14 !important;
+}
+
+h2 {
+  font-size: clamp(1.65rem, 2.3vw, 2.25rem) !important;
+  letter-spacing: -0.03em;
+}
+
+h3 {
+  letter-spacing: -0.02em;
+}
+
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p,
+.stCaption {
+  color: var(--ui-muted) !important;
+}
+
+.st-key-app_header {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 50;
+  margin: -0.35rem -0.5rem 1.7rem;
+  padding: 0.75rem 1rem;
+  background: var(--ui-canvas);
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-panel);
+  box-shadow: 0 12px 30px var(--ui-shadow);
+}
+
+.st-key-app_header h3 {
+  margin: 0;
+  font-size: 1.18rem !important;
+  white-space: nowrap;
+}
+
+.st-key-app_header [data-testid="stCaptionContainer"] {
+  margin-top: -0.35rem;
+}
+
+.st-key-primary_navigation,
+.st-key-secondary_navigation {
+  padding: 0.28rem;
+  background: var(--ui-surface-muted);
+  border: 1px solid var(--ui-line);
+  border-radius: 999px;
+}
+
+.st-key-app_header .st-key-primary_navigation {
+  margin-block: 0;
+}
+
+.st-key-primary_navigation .stButton > button,
+.st-key-secondary_navigation .stButton > button {
+  min-height: 2.35rem;
+  color: var(--ui-muted) !important;
+  background: transparent !important;
+  border-color: transparent !important;
+}
+
+[class*="st-key-primary_navigation_active_"] .stButton > button,
+[class*="st-key-secondary_navigation_active_"] .stButton > button {
+  color: var(--ui-primary-text) !important;
+  background: var(--ui-primary) !important;
+  border-color: var(--ui-primary) !important;
+}
+
+[class*="st-key-primary_navigation_active_"] .stButton > button p,
+[class*="st-key-secondary_navigation_active_"] .stButton > button p,
+.stButton > button[kind="primary"] p,
+.stFormSubmitButton > button[kind="primaryFormSubmit"] p,
+.stDownloadButton > button[kind="primary"] p {
+  color: var(--ui-primary-text) !important;
+}
+
+.st-key-primary_navigation button:disabled,
+.st-key-secondary_navigation button:disabled {
+  opacity: 0.68;
+}
+
+.stButton > button,
+.stFormSubmitButton > button,
+.stDownloadButton > button,
+[data-testid="stPopover"] > button {
+  min-height: 2.65rem;
+  padding-inline: 1.1rem;
+  color: var(--ui-text);
+  background: var(--ui-surface);
+  border: 1px solid var(--ui-line);
+  border-radius: 999px;
+  box-shadow: none;
+  font-weight: 600;
+  transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
+}
+
+.stButton > button:hover,
+.stFormSubmitButton > button:hover,
+.stDownloadButton > button:hover,
+[data-testid="stPopover"] > button:hover {
+  border-color: var(--ui-accent);
+  color: var(--ui-text);
+  transform: translateY(-1px);
+}
+
+.stButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primaryFormSubmit"],
+.stDownloadButton > button[kind="primary"] {
+  color: var(--ui-primary-text);
+  background: var(--ui-primary);
+  border-color: var(--ui-primary);
+}
+
+.stButton > button:focus-visible,
+.stFormSubmitButton > button:focus-visible,
+.stDownloadButton > button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[role="radio"]:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--ui-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+[data-testid="stMetric"] {
+  padding: 0.35rem 0;
+  background: transparent;
+}
+
+[data-testid="stMetricValue"] {
+  color: var(--ui-text);
+  font-size: clamp(1.9rem, 3vw, 2.75rem);
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+[data-testid="stMetricLabel"] {
+  color: var(--ui-muted);
+}
+
+[data-testid="stProgressBar"] > div > div {
+  background: var(--ui-line) !important;
+}
+
+[data-testid="stProgressBar"] > div > div > div,
+[data-testid="stProgressBar"] > div > div > div > div,
+[data-testid="stProgressBar"] [role="progressbar"] > div,
+[data-testid="stProgressBar"] [aria-valuenow] > div,
+[data-testid="stProgressBar"] div[style*="width"],
+[data-testid="stProgressBar"] div[data-testid="stProgressBarFill"] {
+  background: var(--ui-accent) !important;
+}
+
+[data-testid="stVegaLiteChart"],
+[data-testid="stVegaLiteChart"] canvas,
+[data-testid="stVegaLiteChart"] svg {
+  background: transparent !important;
+}
+
+[data-testid="stAlert"] {
+  border-radius: var(--ui-radius-card);
+  border: 1px solid var(--ui-line);
+  box-shadow: none;
+}
+
+[data-testid="stExpander"] {
+  overflow: hidden;
+  background: var(--ui-surface);
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-card);
+  box-shadow: none;
+}
+
+[data-testid="stExpander"] details,
+[data-testid="stExpander"] details > summary,
+[data-testid="stExpander"] details > div {
+  color: var(--ui-text) !important;
+  background: var(--ui-surface) !important;
+}
+
+[data-testid="stExpander"] details {
+  overflow: hidden;
+  border: 0 !important;
+  border-radius: inherit;
+}
+
+[data-testid="stExpander"] details > summary {
+  min-height: 3.25rem;
+  border: 0 !important;
+  border-radius: inherit;
+}
+
+[data-testid="stExpander"] details[open] > summary {
+  border-bottom: 1px solid var(--ui-line) !important;
+  border-radius: var(--ui-radius-card) var(--ui-radius-card) 0 0;
+}
+
+[data-testid="stExpander"] details > summary:hover {
+  background: var(--ui-surface-muted) !important;
+}
+
+[data-testid="stExpander"] details > summary svg {
+  fill: var(--ui-text) !important;
+  color: var(--ui-text) !important;
+}
+
+[data-testid="stForm"],
+[data-testid="stFileUploaderDropzone"] {
+  background: var(--ui-surface);
+  border-color: var(--ui-line);
+  border-radius: var(--ui-radius-card);
+}
+
+[data-testid="stFileUploaderDropzone"] {
+  border-style: dashed;
+}
+
+[data-testid="stFileUploaderDropzone"] button {
+  color: var(--ui-text) !important;
+  background: var(--ui-surface-muted) !important;
+  border: 1px solid var(--ui-line) !important;
+  border-radius: var(--ui-radius-control) !important;
+  box-shadow: none !important;
+}
+
+[data-testid="stFileUploaderDropzone"] button:hover {
+  color: var(--ui-text) !important;
+  background: var(--ui-accent-soft) !important;
+  border-color: var(--ui-accent) !important;
+}
+
+[data-testid="stFileUploaderDropzone"] button p,
+[data-testid="stFileUploaderDropzone"] button span,
+[data-testid="stFileUploaderDropzoneInstructions"],
+[data-testid="stFileUploaderDropzoneInstructions"] span,
+[data-testid="stFileUploader"] small {
+  color: var(--ui-muted) !important;
+}
+
+[data-testid="stFileUploaderDropzone"] button p,
+[data-testid="stFileUploaderDropzone"] button span {
+  color: var(--ui-text) !important;
+}
+
+[data-testid="stFileUploaderDropzone"] button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--ui-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+[data-testid="stNumberInputContainer"],
+[data-testid="stNumberInput"] [data-baseweb="input"] {
+  overflow: hidden;
+  padding: 0 !important;
+  color: var(--ui-text) !important;
+  background: var(--ui-surface) !important;
+  border: 1px solid var(--ui-line) !important;
+  border-radius: var(--ui-radius-control) !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+}
+
+[data-testid="stNumberInput"] [data-baseweb="base-input"],
+[data-testid="stNumberInput"] [data-baseweb="input"]
+  [data-baseweb="base-input"] {
+  overflow: hidden;
+  padding: 0 !important;
+  color: var(--ui-text) !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: inherit !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+}
+
+[data-testid="stNumberInput"] input {
+  height: 100%;
+  padding-inline: 0.8rem !important;
+  background: var(--ui-surface) !important;
+  border: 0 !important;
+  border-radius: calc(var(--ui-radius-control) - 1px) 0 0 calc(var(--ui-radius-control) - 1px) !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+}
+
+[data-testid="stNumberInput"] button {
+  width: 2.75rem !important;
+  min-width: 2.75rem !important;
+  padding: 0 !important;
+  color: var(--ui-text) !important;
+  background: var(--ui-surface-muted) !important;
+  border: 0 !important;
+  border-left: 1px solid var(--ui-line) !important;
+  border-radius: 0 !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+}
+
+[data-testid="stNumberInput"] button:last-of-type {
+  border-radius: 0 calc(var(--ui-radius-control) - 1px)
+    calc(var(--ui-radius-control) - 1px) 0 !important;
+}
+
+[data-testid="stNumberInput"]:focus-within [data-testid="stNumberInputContainer"],
+[data-testid="stNumberInput"]:focus-within [data-baseweb="input"] {
+  border-color: var(--ui-accent) !important;
+  box-shadow: 0 0 0 1px var(--ui-accent) !important;
+}
+
+[data-testid="stNumberInput"] button svg {
+  fill: var(--ui-text) !important;
+  color: var(--ui-text) !important;
+}
+
+input,
+textarea,
+[data-baseweb="select"] > div {
+  color: var(--ui-text) !important;
+  background: var(--ui-surface) !important;
+  border-color: var(--ui-line) !important;
+  border-radius: var(--ui-radius-control) !important;
+}
+
+[data-baseweb="popover"] > div,
+[data-baseweb="menu"] {
+  overflow: hidden;
+  border-radius: var(--ui-radius-control) !important;
+}
+
+[data-baseweb="modal"] > div,
+[data-testid="stDialog"] > div {
+  overflow: hidden;
+  border-radius: var(--ui-radius-panel) !important;
+}
+
+hr {
+  border-color: var(--ui-line) !important;
+}
+
+.st-key-workspace_hero {
+  padding: 1.25rem 0 1.5rem;
+}
+
+.st-key-workspace_metrics {
+  padding: 0.4rem 0 1.2rem;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.st-key-job_board_list,
+.st-key-selected_job_panel {
+  min-height: 100%;
+}
+
+.st-key-job_row_selected,
+[class*="st-key-job_row_"] {
+  padding: 1rem 1rem 0.8rem;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.st-key-job_row_selected {
+  background: var(--ui-accent-soft);
+  border: 1px solid var(--ui-accent);
+  border-radius: var(--ui-radius-card);
+}
+
+.st-key-selected_job_panel {
+  padding: 1.15rem 1.2rem;
+  background: var(--ui-accent-soft);
+  border: 1px solid color-mix(in srgb, var(--ui-accent) 60%, var(--ui-line));
+  border-radius: var(--ui-radius-panel);
+}
+
+.st-key-selected_job_panel [data-testid="stMetricValue"] {
+  font-size: 2rem;
+}
+
+.st-key-secondary_navigation {
+  margin: 0.5rem 0 1.4rem;
+  min-height: 3.35rem;
+  padding: 0.34rem !important;
+  align-items: center !important;
+}
+
+.st-key-secondary_navigation [data-testid="stButton"] {
+  margin: 0 !important;
+  align-self: center !important;
+}
+
+.st-key-secondary_navigation .stButton > button {
+  width: 100% !important;
+  min-height: 2.55rem;
+  margin: 0 !important;
+}
+
+.st-key-detail_actions,
+.st-key-detail_subnavigation {
+  margin-bottom: 1.2rem;
+}
+
+.st-key-detail_subnavigation {
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.st-key-upload_panel,
+.st-key-job_input_panel,
+.st-key-jobs_panel,
+.st-key-clarification_panel,
+.st-key-interview_live_panel,
+.st-key-interview_practice_panel {
+  padding: 1rem 1.1rem;
+  background: var(--ui-surface);
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-panel);
+}
+
+[data-testid="stDataFrame"] {
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-card);
+  overflow: hidden;
+}
+
+@media (max-width: 980px) {
+  [data-testid="stMain"] .block-container {
+    padding: 1rem;
+    border-radius: 16px;
+  }
+
+  .st-key-app_header {
+    position: static;
+    margin-inline: 0;
+  }
+
+  .st-key-app_header {
+    top: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  [data-testid="stAppViewContainer"] {
+    background: var(--ui-canvas);
+  }
+
+  [data-testid="stMain"] .block-container {
+    padding: 0.75rem 0.75rem 2rem;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .st-key-app_header {
+    position: relative;
+    padding: 0.7rem;
+    margin-bottom: 0.8rem;
+    border-radius: 14px;
+  }
+
+  .st-key-header_job_context,
+  .st-key-header_model_calls {
+    display: none;
+  }
+
+  .st-key-app_header [data-testid="stColumn"]:has(.st-key-header_job_context),
+  .st-key-app_header [data-testid="stColumn"]:has(.st-key-header_model_calls),
+  .st-key-app_header [data-testid="column"]:has(.st-key-header_job_context),
+  .st-key-app_header [data-testid="column"]:has(.st-key-header_model_calls) {
+    display: none !important;
+  }
+
+  .st-key-app_header [data-testid="stColumn"]:has(.st-key-header_theme),
+  .st-key-app_header [data-testid="column"]:has(.st-key-header_theme) {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.7rem;
+    width: 2.8rem !important;
+  }
+
+  .st-key-header_theme {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.7rem;
+    width: 2.8rem;
+    z-index: 2;
+  }
+
+  .st-key-primary_navigation,
+  .st-key-secondary_navigation {
+    overflow-x: auto;
+    padding-bottom: 0.15rem;
+  }
+
+  .st-key-primary_navigation [data-testid="stButton"],
+  .st-key-secondary_navigation [data-testid="stButton"] {
+    min-width: 3.4rem !important;
+  }
+
+  .st-key-primary_navigation .stButton > button,
+  .st-key-secondary_navigation .stButton > button {
+    min-height: 2.3rem;
+    padding-inline: 0.35rem !important;
+    font-size: 0.84rem;
+  }
+
+  .st-key-workspace_hero {
+    padding-top: 0.65rem;
+  }
+
+  .st-key-workspace_metrics [data-testid="stHorizontalBlock"] {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    gap: 0.8rem !important;
+  }
+
+  .st-key-workspace_metrics [data-testid="stColumn"],
+  .st-key-workspace_metrics [data-testid="column"] {
+    min-width: 0 !important;
+    width: auto !important;
+    flex: 1 1 0 !important;
+  }
+
+  .st-key-job_board_header {
+    display: none;
+  }
+
+  [class*="st-key-job_row_"] [data-testid="stHorizontalBlock"] {
+    display: grid !important;
+    grid-template-columns: 2rem minmax(0, 1fr) 4.4rem 4.8rem !important;
+    gap: 0.35rem !important;
+    align-items: center;
+  }
+
+  [class*="st-key-job_row_"] [data-testid="stColumn"],
+  [class*="st-key-job_row_"] [data-testid="column"] {
+    min-width: 0 !important;
+    width: auto !important;
+  }
+
+  [class*="st-key-job_row_"] [data-testid="stColumn"]:nth-child(4),
+  [class*="st-key-job_row_"] [data-testid="stColumn"]:nth-child(5),
+  [class*="st-key-job_row_"] [data-testid="column"]:nth-child(4),
+  [class*="st-key-job_row_"] [data-testid="column"]:nth-child(5) {
+    display: none !important;
+  }
+
+  .stButton > button,
+  .stDownloadButton > button {
+    width: 100%;
+  }
+
+  .st-key-job_row_selected,
+  [class*="st-key-job_row_"] {
+    padding-inline: 0.75rem;
+  }
+
+  h1 {
+    font-size: 2rem !important;
+  }
+}

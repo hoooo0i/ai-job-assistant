@@ -1,2 +1,13 @@
 [server]
 maxUploadSize = 10
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#F2C84B"
+backgroundColor = "#EAEBED"
+secondaryBackgroundColor = "#FBFAF7"
+textColor = "#17181B"
+font = "sans-serif"

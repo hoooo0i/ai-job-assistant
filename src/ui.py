@@ -161,7 +161,7 @@ def render_app_header(
     with st.container(key="app_header"):
         brand_column, navigation_column, job_column, count_column, theme_column = (
             st.columns(
-                [1.2, 3.25, 1.35, 0.65, 0.7],
+                [1.2, 3.6, 1.0, 0.65, 0.75],
                 gap="small",
                 vertical_alignment="center",
             )
